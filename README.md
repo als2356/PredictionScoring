@@ -5,3 +5,5 @@ In this `R` notebook, we describe and implement some statistical methods to hand
 * predictions based on *observed cycle one data* to *observed experimental data from cycle two*
 
 We have packaged this methodology as an easy to use function in `R` and can see this type of analysis being beneficial to a variety of researchers, outside of the NGS2 program.  For example, any researchers interested in evaluating pre-registered hypotheses or any researchers working with experimental data that is collected in cycles or stages, may find this discussion helpful.
+
+Our approach is insipred by Cook, Gelman & Rubin (2006)'s methodology for software validation of Bayesian models.
