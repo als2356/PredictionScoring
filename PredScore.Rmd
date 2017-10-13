@@ -21,7 +21,8 @@ bibliography: PredScore.bib
 ---
 
 ```{r set_params, echo=FALSE}
-n.subset <- 1000
+n.subset <- 1000  ## n = 52397
+coefParts <- 25
 ```
 
 In this `R` notebook, we describe and implement some statistical methods to handle prediction scoring.  In the NGS2 program, we see this methodology as helping ETE teams to compare predictions to observed results from the experiments in each cycle.  For example, we might be interested in comparing:
@@ -68,7 +69,7 @@ We will try to answer this question by using our modeling framework to help gaug
 * are those differences large enough to suggest that the data generating mechanisms differ across the two cycles
 * OR are those differences small enough that they could simply be due to inherit sampling variability (e.g. different subjects on a different day in a slightly different environment...)?
 
-Our general idea is to compare predictions from our model (draws from the posterior predictive distribution, in a Bayesian setting) to observed experimental data from Cycle 2.  We can think of our prediction scoring methodology (described in more detail below) simply as a function of experimental data from cycles one and two and the model fitting software.
+Our general idea is to compare predictions from our model (draws from the posterior predictive distribution, in a Bayesian setting) to observed experimental data from Cycle 2.  Unlike typical approaches (i.e. validation), our methodology emphasizes the importance of **calibrating** validation-style results (see the 'Prediction Scoring' section for more details).  We can think of our prediction scoring methodology (described in more detail below) simply as a function of experimental data from cycles one and two and the model fitting software.
 
 ```{r fig_idea, fig.width=6, fig.height=7, echo=FALSE}
 img <- readPNG("Flowchart/Images/Idea.png")
@@ -106,7 +107,7 @@ n <- nrow(blog.full)
 
 We will focus on the *prediction of the number of comments that a blog post receives in the upcoming 24 hours*.  In order to simulate this situation, @buza_2014 chooses a basetime (in the past) and considers blog posts that were published at most 72 hours before the selected base/time.  The dataset was then created by processing the raw HTML-documents of blog posts with basetimes in the years 2010 and 2011.  See @buza_2014 for more details.
 
-This data contains information about
+The training data contains information about
 
 * `r n` blog posts,
 * that each contain `r round(mean(blog.full$length),2)` words on average,
@@ -115,22 +116,26 @@ This data contains information about
 
 As we might expect, the distributions for total comments (prior to baseline) and for comments in the next 24 hours are heavily right-skewed.  The dataset also contains information about the number of comments in the 24-hour period preceding the baseline time, frequent words used in the blog posts, and information about the distribution of comments posted to the source of the blog post (e.g. myblog.blog.org would be the source of the post myblog.blog.org/post_2010_09_10).
 
-(note about testing data sets???)
+The author also provides multiple testing datasets - here, we restrict our attention a single testing set as this setting more closely corresponds to typical practice.
 
 ## A simple model
 In each of the examples below, we consider two simple models - linear regression and k-nearest neighbors.  In the following examples, we will consider this linear regression model from the traditional frequentist viewpoint, as well as within a Bayesian framework.
 
-```{r run_models, results='hide', message=FALSE, warning=FALSE, error=FALSE}
+```{r prep_run_models, echo=FALSE}
 ## For demonstration purposes, use a subset of the full dataset
 if (is.na(n.subset)){ blog <- blog.full 
 } else { blog <- blog.full[sample.int(n,n.subset),] }
+```
 
+```{r run_models, results='hide', message=FALSE, warning=FALSE, error=FALSE}
 ## Regression models
 modelTerms <- c("comm.pre.1day","links.pre.1day",
                  "avg.comm.pre.1day", "avg.links.pre.1day",
                  "sd.comm.pre.1day", "sd.links.pre.1day",
                  "pubtime", "length", "parents")
+```
 
+```{r run_models_mid, echo=FALSE}
 ## Check for variation across observations
 if (sum(sapply(blog[,modelTerms],sd)==0)>0){
   print(paste("Error:",names(which(sapply(blog[,modelTerms],sd)==0)),
@@ -138,7 +143,9 @@ if (sum(sapply(blog[,modelTerms],sd)==0)>0){
 if (sum(sapply(blog.test[,modelTerms],sd)==0)>0){
   print(paste("Error:",names(which(sapply(blog.test[,modelTerms],sd)==0)),
               "has no observed variation in the testing set.")) }
+```
 
+```{r run_models2, results='hide', message=FALSE, warning=FALSE, error=FALSE}
 modelFormula <- as.formula(paste("comm.next24 ~",
                   paste(modelTerms,collapse="+")))
 
@@ -203,7 +210,7 @@ grid.raster(img)
 source("PredScore.R")
 ```
 
-### Outcome-level, Bayesian, linear regression, LOO
+### Predictions for outcome variables
 
 ```{r out_bayes_reg, results='hide', message=FALSE, warning=FALSE, error=FALSE}
 q_cv <- predscore(blog,bayesReg)
@@ -244,11 +251,17 @@ which should follw a $\chi^2$ distribution with $N_rep$ degrees of freedom.
 Xsq_cv <- sum(x_cv^2,na.rm=TRUE)
 Xsq_cyc <- sum(x_cyc^2,na.rm=TRUE)
 
-1-pchisq(Xsq_cv,nrow(blog))
-1-pchisq(Xsq_cyc,nrow(blog.test))
+pval_cv <- 1-pchisq(Xsq_cv,nrow(blog))
+pval_cyc <- 1-pchisq(Xsq_cyc,nrow(blog.test))
+
+pval_cv
+pval_cyc
+```
+```{r write_chisq, echo=FALSE}
+chiSmall <- (pval_cv+pval_cyc<.1)
 ```
 
-Since these p-values are not very small, we fail to reject the null hypothesis that the $q_i$'s are uniformly distributed.  This is an indication that the modelling choices are not unreasonable.
+Since these p-values `r ifelse(chiSmall,"are small","are not very small")`, we `r ifelse(chiSmall,"can reject","fail to reject")` the null hypothesis that the $q_i$'s are uniformly distributed.  This is an indication that the modelling choices `r ifelse(chiSmall,"should be reconsidered","are not unreasonable")`.
 
 To compare the posterior quantiles and actually address prediction scoring, we can compute a two-sample Kolmogorov-Smirnov test statistic:
 \[ D_{n_1,n_2} = \sup_{q} \left| F_{n_1}^{(1)}(q) - F_{n_2}^{(2)}(q)  \right| \]
@@ -258,73 +271,88 @@ where $F_{n_1}^{(1)}(q)$ is the empirical distribution function for the posterio
 We can reject the null hypothesis that the two samples come from a common distribution at level $\alpha$ if
 \[ D_{n_1,n_2} > \sqrt{ \frac{ n_1 + n_2}{n_1n_2} \left[ -\frac{1}{2} \text{log}\left( \frac{\alpha}{2} \right) \right] }.\]
 
-```{r ks_test, warning=FALSE}
+```{r ks_test, warning=FALSE, message=FALSE}
 ks.test(q_cv$q,q_cyc$q)
 ```
-Since this p-value is not very small, we fail to reject the null hypothesis that the $q_i$'s come from a common distribution.  This is an indication that the data generating process most likely differs across experimental cycles.
 
-### Outcome-level, Bayesian, linear regression, k-fold
+```{r write_ks_test, echo=FALSE}
+ksSmall <- (ks.test(q_cv$q,q_cyc$q)$p.value<.05)
+```
+
+Since this p-value `r ifelse(ksSmall,"is small","is not very small")`, we `r ifelse(ksSmall,"can reject","fail to reject")` the null hypothesis that the $q_i$'s come from a common distribution.  This is an indication that the data generating process most likely `r ifelse(ksSmall,"differs","does not differ")` across the experimental cycles.
+
+#### k-fold version
+
+Rather than using leave-one-out cross validation, we might consider cutting the computation time involved by using k-fold cross validation:
 ```{r out_bayes_reg_k, results='hide', message=FALSE, warning=FALSE, error=FALSE}
 q_cv_k <- predscore(blog,bayesReg,partitions=10)
 plot.predscore(q_cv_k$q)
 ```
 
-### Coefficient-level, Bayesian, linear regression
+We can then compare this to the validation results computed previously:
+```{r ks_test_kfold, warning=FALSE, message=FALSE}
+ks.test(q_cv_k$q,q_cyc$q)
+```
+
+```{r write_ks_test_kfold, echo=FALSE, fig.width=5}
+ksSmall.kfold <- (ks.test(q_cv_k$q,q_cyc$q)$p.value<.05)
+```
+
+Since this p-value `r ifelse(ksSmall.kfold,"is small","is not very small")`, we `r ifelse(ksSmall.kfold,"can reject","fail to reject")` the null hypothesis that the $q_i$'s come from a common distribution.  This is an indication that the data generating process most likely `r ifelse(ksSmall.kfold,"differs","does not differ")` across the experimental cycles.
+
+### Predictions for model parameters
+Note that when we were making predictions for the outcome variables, there is a clear connection to the *true* observation:
+
+* In cross-validation, we have access to the truth.  For example, in leave-one-out cross validation, the observation left out is the true observation which we're trying to predict, based on all other data points.
+* In validation, we treat the cycle two observation as the truth, which we are trying to predict based on cycle one observations.
+
+In both cases, the true observation is a single number.  When we move to the case where we are interested in making predictions for model parameters, it is more natural (particulary, in a Bayesian setting) to think of the truth as a distribution - the marginal posterior distributions for the model parameter(s) of interest.  Thus, when making predictions for model parameters,
+
+* In cross validation, we will compare (samples from) the posterior distribution for the parameters based on the $k$th subset of the data to (samples from) the posterior distribution for the parameters based on the remaining data points.
+* In validation, we will compare (samples from) the posterior distribution based on cycle one data to (samples from) the posterior distribution based on cycle two data.
+
+Because we are now making comparisons across (samples from) two distributions (rather than comparing a single true observation to a distribution, as before), using quantiles no longer makes sense.  Instead, we will use a Kolmogorov-Smirnov test to test whether the samples come from a single distribution.
+
+Finally, to score these predictions, we can compare the K-S test statistic from the validation procedure to those obtained from the cross-validation routine:
+
+```{r pre_coef_bayes_reg}
+coefParts
+```
+
 ```{r coef_bayes_reg, results='hide', message=FALSE, warning=FALSE, error=FALSE}
-q_cv_coef <- predscore(blog,bayesReg,params=c("pubtime","length"))
-q_cyc_coef <- predscore(blog,bayesReg,blog.test,params=c("pubtime","length"))
-```
+paramList <- c("pubtime","length")
+q_cv_coef <- predscore(blog,bayesReg,params=paramList,partitions=coefParts)
+q_cyc_coef <- predscore(blog,bayesReg,blog.test,params=paramList)
 
-<!-- EXTRA CODE -->
-```{r loo_cv_long_response, echo=FALSE, eval=FALSE}
-n.predict <- 500
-q_loo <- NULL
-for (i in 1:n){
-  fit_minus_i <- glm( decision ~ condition*round_num,
-                        family=binomial,
-                        data=cooperation[-i,] )
-  y_hat_minus_i <- rbinom(n.predict, 1, predict( fit_minus_i,
-                        newdata=cooperation[i,],
-                        type="response" ) )
-  q_loo[i] <- #sum(cooperation$decision[i] >= y_hat_minus_i) /
-            sum(cooperation$decision[i] == y_hat_minus_i) /
-            length(y_hat_minus_i)
-  if (i == round(.2*n)){ cat("20%...")}
-  if (i == round(.4*n)){ cat("40%...")}
-  if (i == round(.6*n)){ cat("60%...")}
-  if (i == round(.8*n)){ cat("80%...\n")}
+par(mfrow=c(length(paramList),2))
+for (i in 1:length(paramList)){
+  hist(q_cv_coef$results[,i], xlab="KS statistic",
+       xlim=range(c(q_cv_coef$results[,i],q_cyc_coef$ks.stat[i])),
+       main=paramList[i], breaks=25)
+  abline(v=q_cyc_coef$ks.stat[i],col="red")
+  hist(q_cv_coef$pvalues[,i],  xlab="KS p-value",
+       xlim=range(c(q_cv_coef$results[,i],q_cyc_coef$p.value[i])),
+       main=paramList[i],breaks=25)
+  abline(v=q_cyc_coef$p.value[i],col="red")
 }
-plot(q_loo, col=as.factor(cooperation$session))
 ```
 
-```{r loo_cv_long_params, echo=FALSE, eval=FALSE}
-fit_full <- stan_glm( decision ~ condition*round_num,
-                        family = binomial,
-                        data = cooperation,
-                        chains = 1 )
-theta_full <- fit_full$coefficients
+Since the validation K-S statistics look much larger than the set of cross-validation K-S statistics, we have some evidence that the data generating process may differ across the two cycles.  That is, the difference between the marginal posterior distributions for the model parameters that we observe between cycle one and cycle two data is outside of our expectation for the difference, based on differences across marginal posterior distributions obtained using cross-validation.
 
-n.predict <- 1000
-q_loo <- matrix(NA,nrow=n,
-                ncol=length(theta_full))
-for (i in 1:100){
-  fit_minus_i <- stan_glm( formula(fit_full),
-                              family = family(fit_full),
-                              data = cooperation[-i,],
-                              chains = 1)
-  theta_minus_i <- cbind( extract(fit_minus_i$stanfit,"alpha")[[1]],
-                            extract(fit_minus_i$stanfit,"beta")[[1]] )[
-                            sample.int(nrow(extract(fit_minus_i$stanfit)[[1]]),
-                                       n.predict),]
-  q_loo[i,] <- qhat(theta_full,theta_minus_i)
-  print(i)
-}
+### Non-Bayesian models
+We can also extend this approach to non-Bayesian models - for example, frequentist linear regression or k-nearest neighbors - by using bootstrapping to replace the posterior distributions discussed above.
 
-par(mfrow=c(2,length(theta_full)/2))
-for (i in 1:length(theta_full)){ hist(q_loo[,i]) }
+#### Linear regression
+Consider the cross-validation setting explained above.  In the Bayesian framework, we compare the truth, $y_k$, to $r$ samples from the posterior predictive distribution based on $y_{k-1}, x_{k-1}$.  In a non-Bayesian setting we replace these samples from the posterior predictive distribution with predictions based on $r$ bootstrapped datasets.
 
-x_loo <- sapply(1:ncol(q_loo), function(x){
-          sum(qnorm(q_loo[,x])^2,na.rm=TRUE) })
-pchisq(x_loo,n)
+As discussed above, we might be interested in comparing predictions at the outcome-level or for model parameters.  In either case, we use bootstrapping to replace the posterior distributions that we relied on in previous versions of our prediction scoring routine.
+
+```{r out_freq_reg, results='hide', message=FALSE, warning=FALSE, error=FALSE}
+q_freq_cv <- predscore.nonBayes(blog,freqReg,partitions=10)
+q_freq_cyc <- predscore.nonBayes(blog,freqReg,blog.test,partitions=10)
+
+plot.predscore(q_freq_cv$q,q_freq_cyc$q)
 ```
+
+
 ## References
